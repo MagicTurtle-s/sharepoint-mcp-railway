@@ -5,13 +5,9 @@ This file exists because Railway's auto-detection looks for main.py
 in the project root. It simply imports and runs the HTTP server.
 """
 
-import sys
 import os
 
-# Add src to path so imports work
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
-
-# Import the Starlette app
+# Import the Starlette app (package installed via setup.py)
 from mcp_sharepoint.server_http import app
 
 # For Railway/uvicorn to discover
