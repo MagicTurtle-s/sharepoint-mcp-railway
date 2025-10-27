@@ -2,7 +2,8 @@ import base64, os, fitz, io, logging, time, pandas as pd
 from typing import Dict, Any, List, Optional
 from docx import Document
 from openpyxl import load_workbook
-from .common import logger, SHP_DOC_LIBRARY, sp_context
+from office365.sharepoint.client_context import ClientContext
+from .common import logger, SHP_DOC_LIBRARY, sp_context, get_default_doc_library
 
 logger = logging.getLogger(__name__)
 
@@ -67,14 +68,25 @@ def _save_content_to_file(content_bytes: bytes, file_path: str) -> Dict[str, Any
         logger.error(f"Failed to save file to {file_path}: {e}")
         return {"success": False, "error": str(e)}
 
-def _load_sp_items(path: str, item_type: str) -> List[Dict[str, Any]]:
-    """Generic function to load folders or files from SharePoint"""
-    folder = sp_context.web.get_folder_by_server_relative_url(path)
+def _load_sp_items(path: str, item_type: str, context: Optional[ClientContext] = None) -> List[Dict[str, Any]]:
+    """
+    Generic function to load folders or files from SharePoint.
+
+    Args:
+        path: Server-relative path to the folder
+        item_type: Either "folders" or "files"
+        context: SharePoint context (uses global sp_context if None for backwards compatibility)
+    """
+    ctx = context if context is not None else sp_context
+    if ctx is None:
+        raise ValueError("SharePoint context not available. Please provide site_url or set SHP_SITE_URL.")
+
+    folder = ctx.web.get_folder_by_server_relative_url(path)
     items = getattr(folder, item_type)
     props = ["ServerRelativeUrl", "Name", "TimeCreated", "TimeLastModified"] + (["Length"] if item_type == "files" else [])
-    sp_context.load(items, props)
-    sp_context.execute_query()
-    
+    ctx.load(items, props)
+    ctx.execute_query()
+
     return [{
         "name": item.name,
         "url": item.properties.get("ServerRelativeUrl"),
@@ -83,15 +95,27 @@ def _load_sp_items(path: str, item_type: str) -> List[Dict[str, Any]]:
         "modified": item.properties.get("TimeLastModified").isoformat() if item.properties.get("TimeLastModified") else None
     } for item in items]
 
-def list_folders(parent_folder: Optional[str] = None) -> List[Dict[str, Any]]:
-    """List folders in the specified directory or root if not specified"""
-    logger.info(f"Listing folders in {parent_folder or 'root directory'}")
-    return _load_sp_items(_get_sp_path(parent_folder), "folders")
+def list_folders(parent_folder: Optional[str] = None, context: Optional[ClientContext] = None) -> List[Dict[str, Any]]:
+    """
+    List folders in the specified directory or root if not specified.
 
-def list_documents(folder_name: str) -> List[Dict[str, Any]]:
-    """List all documents in a specified folder"""
+    Args:
+        parent_folder: Relative folder path (e.g., "Documents/Proposals")
+        context: SharePoint context (optional, uses global if None)
+    """
+    logger.info(f"Listing folders in {parent_folder or 'root directory'}")
+    return _load_sp_items(_get_sp_path(parent_folder), "folders", context)
+
+def list_documents(folder_name: str, context: Optional[ClientContext] = None) -> List[Dict[str, Any]]:
+    """
+    List all documents in a specified folder.
+
+    Args:
+        folder_name: Relative folder path (e.g., "Documents/Proposals")
+        context: SharePoint context (optional, uses global if None)
+    """
     logger.info(f"Listing documents in folder: {folder_name}")
-    return _load_sp_items(_get_sp_path(folder_name), "files")
+    return _load_sp_items(_get_sp_path(folder_name), "files", context)
 
 def extract_text_from_pdf(pdf_content):
     """Extract text from PDF using PyMuPDF"""
@@ -131,16 +155,26 @@ def extract_text_from_word(content_bytes):
         logger.error(f"Error extracting text from Word: {e}")
         raise
 
-def get_folder_tree(parent_folder: Optional[str] = None) -> Dict[str, Any]:
-    """Iteratively build folder tree level by level to avoid recursion limits"""
+def get_folder_tree(parent_folder: Optional[str] = None, context: Optional[ClientContext] = None) -> Dict[str, Any]:
+    """
+    Iteratively build folder tree level by level to avoid recursion limits.
+
+    Args:
+        parent_folder: Relative folder path (e.g., "Documents")
+        context: SharePoint context (optional, uses global if None)
+    """
+    ctx = context if context is not None else sp_context
+    if ctx is None:
+        raise ValueError("SharePoint context not available.")
+
     root_path, tree_nodes = _get_sp_path(parent_folder), {}
     logger.info(f"Building iterative tree for {parent_folder or 'root'}")
-    
+
     try:
         # Get root folder
-        root = sp_context.web.get_folder_by_server_relative_url(root_path)
-        sp_context.load(root, ["Name", "ServerRelativeUrl", "TimeCreated", "TimeLastModified"])
-        sp_context.execute_query()
+        root = ctx.web.get_folder_by_server_relative_url(root_path)
+        ctx.load(root, ["Name", "ServerRelativeUrl", "TimeCreated", "TimeLastModified"])
+        ctx.execute_query()
         
         # Process folders level by level
         pending = [parent_folder or ""]
@@ -160,8 +194,8 @@ def get_folder_tree(parent_folder: Optional[str] = None) -> Dict[str, Any]:
                 
                 for folder_path in batch:
                     try:
-                        subfolders = [f["name"] for f in list_folders(folder_path)]
-                        files = list_documents(folder_path)
+                        subfolders = [f["name"] for f in list_folders(folder_path, ctx)]
+                        files = list_documents(folder_path, ctx)
                         
                         tree_nodes[folder_path] = [
                             {"name": name, "type": "folder", "children": []} for name in subfolders
@@ -201,17 +235,28 @@ def get_folder_tree(parent_folder: Optional[str] = None) -> Dict[str, Any]:
         logger.error(f"Failed to build tree for '{root_path}': {e}")
         return {"name": os.path.basename(root_path), "path": root_path, "type": "folder", "error": "Could not access folder", "children": []}
 
-def get_document_content(folder_name: str, file_name: str) -> dict:
-    """Retrieve document content; supports PDF text extraction"""
+def get_document_content(folder_name: str, file_name: str, context: Optional[ClientContext] = None) -> dict:
+    """
+    Retrieve document content; supports PDF, Word, Excel text extraction.
+
+    Args:
+        folder_name: Relative folder path (e.g., "Documents/Proposals")
+        file_name: Name of the file to retrieve
+        context: SharePoint context (optional, uses global if None)
+    """
+    ctx = context if context is not None else sp_context
+    if ctx is None:
+        raise ValueError("SharePoint context not available.")
+
     file_path = _get_sp_path(f"{folder_name}/{file_name}")
-    file = sp_context.web.get_file_by_server_relative_url(file_path)
-    sp_context.load(file, ["Exists", "Length", "Name"])
-    sp_context.execute_query()
+    file = ctx.web.get_file_by_server_relative_url(file_path)
+    ctx.load(file, ["Exists", "Length", "Name"])
+    ctx.execute_query()
     logger.info(f"File exists: {file.exists}, size: {file.length}")
 
     content = io.BytesIO()
     file.download(content)
-    sp_context.execute_query()
+    ctx.execute_query()
     content_bytes = content.getvalue()
     
     # Determine file type and process accordingly
@@ -250,24 +295,36 @@ def get_document_content(folder_name: str, file_name: str) -> dict:
     
     return {"name": file_name, "content_type": "binary", "content_base64": base64.b64encode(content_bytes).decode(), "size": len(content_bytes)}
 
-def download_document(folder_name: str, file_name: str, local_path: str) -> Dict[str, Any]:
-    """Download document from SharePoint to local filesystem with fallback support"""
+def download_document(folder_name: str, file_name: str, local_path: str, context: Optional[ClientContext] = None) -> Dict[str, Any]:
+    """
+    Download document from SharePoint to local filesystem with fallback support.
+
+    Args:
+        folder_name: Relative folder path (e.g., "Documents/Proposals")
+        file_name: Name of the file to download
+        local_path: Target local filesystem path
+        context: SharePoint context (optional, uses global if None)
+    """
+    ctx = context if context is not None else sp_context
+    if ctx is None:
+        raise ValueError("SharePoint context not available.")
+
     logger.info(f"Downloading {folder_name}/{file_name} to {local_path}")
-    
+
     try:
         # Get file from SharePoint
         file_path = _get_sp_path(f"{folder_name}/{file_name}")
-        file = sp_context.web.get_file_by_server_relative_url(file_path)
-        sp_context.load(file, ["Exists", "Length", "Name"])
-        sp_context.execute_query()
-        
+        file = ctx.web.get_file_by_server_relative_url(file_path)
+        ctx.load(file, ["Exists", "Length", "Name"])
+        ctx.execute_query()
+
         if not file.exists:
             return {"success": False, "error": f"File {file_name} does not exist in folder {folder_name}"}
-        
+
         # Download file content
         content = io.BytesIO()
         file.download(content)
-        sp_context.execute_query()
+        ctx.execute_query()
         content_bytes = content.getvalue()
         
         # Try to save to requested path first
