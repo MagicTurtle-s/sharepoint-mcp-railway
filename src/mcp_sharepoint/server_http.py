@@ -125,9 +125,24 @@ async def handle_mcp(request: Request) -> Response:
     Streamable HTTP transport endpoint for MCP communication.
 
     This is the modern transport method that Claude.ai prefers.
-    Handles both GET (for establishing connections) and POST (for messages).
+    Handles GET (for establishing connections), POST (for messages), and HEAD (for discovery).
     """
-    if request.method == "GET":
+    if request.method == "HEAD":
+        # HEAD request - endpoint discovery
+        logger.info(f"HEAD request to /mcp from {request.client.host}")
+        # Return 200 OK with headers indicating this is a public MCP endpoint
+        return Response(
+            status_code=200,
+            headers={
+                "X-MCP-Version": "2025-03-26",
+                "X-MCP-Auth": "none",  # Indicate no authentication required
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
+                "Access-Control-Allow-Headers": "*",
+            }
+        )
+
+    elif request.method == "GET":
         # GET request - establish a streaming connection
         logger.info(f"New Streamable HTTP GET connection from {request.client.host}")
 
@@ -213,6 +228,23 @@ async def handle_mcp(request: Request) -> Response:
         return JSONResponse({"error": "Method not allowed"}, status_code=405)
 
 
+async def oauth_not_required(request: Request) -> JSONResponse:
+    """
+    OAuth discovery endpoints - indicate that OAuth is not required.
+
+    These endpoints are queried by claude.ai to discover if OAuth is needed.
+    Returning 404 tells claude.ai that this is a public endpoint with no auth.
+    """
+    return JSONResponse(
+        {"error": "OAuth not required - this is a public MCP endpoint"},
+        status_code=404,
+        headers={
+            "X-MCP-Auth": "none",
+            "Access-Control-Allow-Origin": "*",
+        }
+    )
+
+
 async def root_endpoint(request: Request) -> JSONResponse:
     """
     Root endpoint with server information.
@@ -222,8 +254,9 @@ async def root_endpoint(request: Request) -> JSONResponse:
     """
     return JSONResponse({
         "name": "SharePoint MCP Railway",
-        "description": "Multi-site SharePoint MCP server for Claude.ai",
+        "description": "Multi-site SharePoint MCP server for Claude.ai (Public - No Auth Required)",
         "version": "0.1.6",
+        "authentication": "none",
         "endpoints": {
             "mcp": "/mcp (Streamable HTTP - Recommended)",
             "sse": "/sse (Legacy SSE)",
@@ -249,9 +282,14 @@ app = Starlette(
     routes=[
         Route('/', root_endpoint, methods=['GET']),
         Route('/health', health_check, methods=['GET']),
-        Route('/mcp', handle_mcp, methods=['GET', 'POST']),  # Streamable HTTP transport (modern)
+        Route('/mcp', handle_mcp, methods=['GET', 'POST', 'HEAD']),  # Streamable HTTP transport (modern)
         Route('/sse', handle_sse, methods=['GET']),  # Legacy SSE transport
         Route('/messages/{session_id:path}', handle_messages, methods=['POST']),  # Legacy SSE messages
+        # OAuth discovery endpoints - return 404 to indicate no auth required
+        Route('/.well-known/oauth-protected-resource/mcp', oauth_not_required, methods=['GET']),
+        Route('/.well-known/oauth-authorization-server/mcp', oauth_not_required, methods=['GET']),
+        Route('/.well-known/oauth-authorization-server', oauth_not_required, methods=['GET']),
+        Route('/register', oauth_not_required, methods=['POST']),
     ],
     middleware=[
         Middleware(
