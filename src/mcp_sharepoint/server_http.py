@@ -208,18 +208,41 @@ async def handle_mcp(request: Request) -> Response:
             elif method == "tools/list":
                 # Get tools from the MCP server
                 tools_list = []
-                if hasattr(mcp, '_mcp_server') and hasattr(mcp._mcp_server, '_tools'):
-                    for tool_name, tool_func in mcp._mcp_server._tools.items():
-                        tool_info = {
-                            "name": tool_name,
-                            "description": getattr(tool_func, '__doc__', ''),
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {},
-                                "required": []
+
+                # Try different ways to access tools from FastMCP
+                logger.info(f"MCP type: {type(mcp)}, has _mcp_server: {hasattr(mcp, '_mcp_server')}")
+
+                # FastMCP stores tools in _mcp_server.request_handlers['tools/list']
+                # But we need to access the tool definitions differently
+                if hasattr(mcp, '_mcp_server'):
+                    server = mcp._mcp_server
+                    logger.info(f"Server type: {type(server)}")
+
+                    # Check different possible locations
+                    if hasattr(server, '_tool_manager') and hasattr(server._tool_manager, 'tools'):
+                        logger.info(f"Found _tool_manager.tools with {len(server._tool_manager.tools)} tools")
+                        for tool in server._tool_manager.tools:
+                            tools_list.append(tool)
+                    elif hasattr(server, 'list_tools'):
+                        logger.info("Found list_tools method")
+                        tools_result = await server.list_tools()
+                        if hasattr(tools_result, 'tools'):
+                            tools_list = tools_result.tools
+                    elif hasattr(server, '_tools'):
+                        logger.info(f"Found _tools attribute")
+                        for tool_name, tool_func in server._tools.items():
+                            tool_info = {
+                                "name": tool_name,
+                                "description": getattr(tool_func, '__doc__', ''),
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {},
+                                    "required": []
+                                }
                             }
-                        }
-                        tools_list.append(tool_info)
+                            tools_list.append(tool_info)
+                    else:
+                        logger.warning(f"Could not find tools. Server attributes: {[a for a in dir(server) if not a.startswith('_')]}")
 
                 response = {
                     "jsonrpc": "2.0",
@@ -228,7 +251,7 @@ async def handle_mcp(request: Request) -> Response:
                         "tools": tools_list
                     }
                 }
-                logger.info(f"Returning {len(tools_list)} tools")
+                logger.info(f"Returning {len(tools_list)} tools: {[t.get('name', 'unknown') if isinstance(t, dict) else getattr(t, 'name', 'unknown') for t in tools_list]}")
                 return JSONResponse(response)
 
             # Handle resources/list request
