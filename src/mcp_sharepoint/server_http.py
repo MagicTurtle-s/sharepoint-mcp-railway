@@ -8,10 +8,10 @@ enabling deployment to Railway and integration with Claude.ai web interface.
 import os
 import logging
 from starlette.applications import Starlette
-from starlette.routing import Route
+from starlette.routing import Route, Mount
 from starlette.responses import JSONResponse, Response
 from starlette.requests import Request
-from sse_starlette.sse import EventSourceResponse
+from mcp.server.sse import SseServerTransport
 import uvicorn
 
 # Import the MCP server and register all tools
@@ -19,6 +19,9 @@ from .common import logger, mcp
 from . import tools, resources  # This registers all the tools
 
 logger.info("Initializing HTTP/SSE transport server...")
+
+# Create SSE transport
+sse_transport = SseServerTransport("/messages")
 
 
 async def health_check(request: Request) -> Response:
@@ -37,32 +40,27 @@ async def health_check(request: Request) -> Response:
     })
 
 
-async def sse_endpoint(request: Request) -> EventSourceResponse:
+async def handle_sse(request: Request) -> Response:
     """
     Server-Sent Events endpoint for MCP communication.
 
     This endpoint handles the MCP protocol over SSE, allowing Claude.ai
     web interface to communicate with the SharePoint MCP server.
-
-    The MCP SDK handles the actual SSE protocol implementation.
     """
     logger.info(f"SSE connection established from {request.client.host}")
 
-    async def event_generator():
-        """Generate SSE events from MCP server."""
-        try:
-            # The FastMCP server handles SSE protocol internally
-            # We just need to yield the events
-            async for message in mcp.sse_server(request.scope, request.receive, lambda x: None):
-                yield message
-        except Exception as e:
-            logger.error(f"Error in SSE event generator: {str(e)}")
-            yield {
-                "event": "error",
-                "data": f"Server error: {str(e)}"
-            }
+    async with sse_transport.connect_sse(
+        request.scope,
+        request.receive,
+        request._send
+    ) as streams:
+        await mcp._mcp_server.run(
+            streams[0],  # read stream
+            streams[1],  # write stream
+            mcp._mcp_server.create_initialization_options()
+        )
 
-    return EventSourceResponse(event_generator())
+    return Response()
 
 
 async def root_endpoint(request: Request) -> JSONResponse:
@@ -78,6 +76,7 @@ async def root_endpoint(request: Request) -> JSONResponse:
         "version": "0.1.6",
         "endpoints": {
             "sse": "/sse",
+            "messages": "/messages",
             "health": "/health"
         },
         "features": [
@@ -98,7 +97,8 @@ app = Starlette(
     routes=[
         Route('/', root_endpoint, methods=['GET']),
         Route('/health', health_check, methods=['GET']),
-        Route('/sse', sse_endpoint, methods=['GET']),
+        Route('/sse', handle_sse, methods=['GET']),
+        Mount('/messages', app=sse_transport.handle_post_message),
     ]
 )
 
@@ -111,6 +111,7 @@ async def startup_event():
     logger.info("=" * 60)
     logger.info(f"Multi-site mode enabled")
     logger.info(f"SSE endpoint: /sse")
+    logger.info(f"Messages endpoint: /messages")
     logger.info(f"Health check: /health")
     logger.info("=" * 60)
 
