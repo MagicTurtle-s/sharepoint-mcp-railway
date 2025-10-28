@@ -178,51 +178,159 @@ async def handle_mcp(request: Request) -> Response:
             # Read the JSON-RPC request body
             body = await request.body()
             request_data = json.loads(body)
-            logger.debug(f"Received JSON-RPC request: {request_data.get('method', 'unknown')}")
+            method = request_data.get('method', 'unknown')
+            request_id = request_data.get('id')
 
-            # Create response queue to capture the response
-            response_data = None
-            response_event = asyncio.Event()
+            logger.info(f"Received JSON-RPC request: method={method}, id={request_id}")
 
-            # Create a custom send function that captures the response
-            async def capture_send(message):
-                nonlocal response_data
-                if message.get("type") == "http.response.body":
-                    body_data = message.get("body", b"")
-                    if body_data:
+            # Handle initialize request
+            if method == "initialize":
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {
+                            "tools": {},
+                            "resources": {},
+                            "prompts": {}
+                        },
+                        "serverInfo": {
+                            "name": "mcp_sharepoint",
+                            "version": "0.1.6"
+                        }
+                    }
+                }
+                logger.info(f"Returning initialize response")
+                return JSONResponse(response)
+
+            # Handle tools/list request
+            elif method == "tools/list":
+                # Get tools from the MCP server
+                tools_list = []
+                if hasattr(mcp, '_mcp_server') and hasattr(mcp._mcp_server, '_tools'):
+                    for tool_name, tool_func in mcp._mcp_server._tools.items():
+                        tool_info = {
+                            "name": tool_name,
+                            "description": getattr(tool_func, '__doc__', ''),
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {},
+                                "required": []
+                            }
+                        }
+                        tools_list.append(tool_info)
+
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {
+                        "tools": tools_list
+                    }
+                }
+                logger.info(f"Returning {len(tools_list)} tools")
+                return JSONResponse(response)
+
+            # Handle resources/list request
+            elif method == "resources/list":
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {
+                        "resources": []
+                    }
+                }
+                logger.info(f"Returning resources list")
+                return JSONResponse(response)
+
+            # Handle prompts/list request
+            elif method == "prompts/list":
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {
+                        "prompts": []
+                    }
+                }
+                logger.info(f"Returning prompts list")
+                return JSONResponse(response)
+
+            # Handle tools/call request
+            elif method == "tools/call":
+                params = request_data.get('params', {})
+                tool_name = params.get('name')
+                tool_args = params.get('arguments', {})
+
+                logger.info(f"Calling tool: {tool_name} with args: {tool_args}")
+
+                # Call the tool through the MCP server
+                if hasattr(mcp, '_mcp_server') and hasattr(mcp._mcp_server, '_tools'):
+                    if tool_name in mcp._mcp_server._tools:
                         try:
-                            response_data = json.loads(body_data)
-                        except:
-                            response_data = {"error": "Invalid response format"}
-                    response_event.set()
+                            tool_func = mcp._mcp_server._tools[tool_name]
+                            result = await tool_func(**tool_args)
 
-            # Create temporary transport and handle the message
-            sse_transport = SseServerTransport("/mcp")
+                            response = {
+                                "jsonrpc": "2.0",
+                                "id": request_id,
+                                "result": {
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": str(result)
+                                        }
+                                    ]
+                                }
+                            }
+                            logger.info(f"Tool {tool_name} executed successfully")
+                            return JSONResponse(response)
+                        except Exception as e:
+                            logger.error(f"Error executing tool {tool_name}: {e}", exc_info=True)
+                            response = {
+                                "jsonrpc": "2.0",
+                                "id": request_id,
+                                "error": {
+                                    "code": -32603,
+                                    "message": f"Tool execution failed: {str(e)}"
+                                }
+                            }
+                            return JSONResponse(response)
 
-            # Try to handle the POST message
-            result = await sse_transport.handle_post_message(request.scope, request.receive, capture_send)
+                # Tool not found
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {
+                        "code": -32601,
+                        "message": f"Tool not found: {tool_name}"
+                    }
+                }
+                return JSONResponse(response)
 
-            # If handle_post_message returns a response, use it
-            if result is not None:
-                return result
+            # Handle notifications (no response needed)
+            elif request_id is None:
+                logger.info(f"Received notification: {method}")
+                return Response(status_code=204)  # No content for notifications
 
-            # Otherwise, wait for captured response or timeout
-            try:
-                await asyncio.wait_for(response_event.wait(), timeout=30.0)
-                if response_data:
-                    return JSONResponse(response_data)
-            except asyncio.TimeoutError:
-                logger.error("Timeout waiting for MCP response")
-
-            # Fallback: return a basic response
-            return JSONResponse({"jsonrpc": "2.0", "error": {"code": -32603, "message": "Internal error"}, "id": request_data.get("id")})
+            # Unknown method
+            else:
+                logger.warning(f"Unknown method: {method}")
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {
+                        "code": -32601,
+                        "message": f"Method not found: {method}"
+                    }
+                }
+                return JSONResponse(response)
 
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON in POST request: {e}")
             return JSONResponse({"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error"}, "id": None}, status_code=400)
         except Exception as e:
             logger.error(f"Error handling Streamable HTTP POST: {e}", exc_info=True)
-            return JSONResponse({"jsonrpc": "2.0", "error": {"code": -32603, "message": "Internal error"}, "id": None}, status_code=500)
+            return JSONResponse({"jsonrpc": "2.0", "error": {"code": -32603, "message": f"Internal error: {str(e)}"}, "id": None}, status_code=500)
 
     else:
         return JSONResponse({"error": "Method not allowed"}, status_code=405)
