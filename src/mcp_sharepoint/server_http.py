@@ -8,15 +8,17 @@ enabling deployment to Railway and integration with Claude.ai web interface.
 import os
 import logging
 import uuid
+import json
 from typing import Dict
 from starlette.applications import Starlette
 from starlette.routing import Route
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.requests import Request
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from mcp.server.sse import SseServerTransport
 import uvicorn
+import asyncio
 
 # Import the MCP server and register all tools
 from .common import logger, mcp
@@ -118,6 +120,62 @@ async def handle_messages(request: Request) -> Response:
         return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
+async def handle_mcp(request: Request) -> Response:
+    """
+    Streamable HTTP transport endpoint for MCP communication.
+
+    This is the modern transport method that Claude.ai prefers.
+    Handles both GET (for establishing connections) and POST (for messages).
+    """
+    if request.method == "GET":
+        # GET request - establish a streaming connection
+        logger.info(f"New Streamable HTTP connection from {request.client.host}")
+
+        # Create a new transport for this connection
+        sse_transport = SseServerTransport("/mcp")
+
+        async def send_wrapper(message):
+            """Wrapper to properly handle send calls"""
+            await request._send(message)
+
+        try:
+            async with sse_transport.connect_sse(
+                request.scope,
+                request.receive,
+                send_wrapper
+            ) as streams:
+                await mcp._mcp_server.run(
+                    streams[0],  # read stream
+                    streams[1],  # write stream
+                    mcp._mcp_server.create_initialization_options()
+                )
+        except Exception as e:
+            logger.error(f"Error in Streamable HTTP connection: {e}", exc_info=True)
+            raise
+
+        return Response()
+
+    elif request.method == "POST":
+        # POST request - handle a message
+        logger.info(f"Streamable HTTP POST message from {request.client.host}")
+
+        # Create a temporary transport to handle the message
+        sse_transport = SseServerTransport("/mcp")
+
+        async def send_wrapper(message):
+            """Wrapper to properly handle send calls"""
+            await request._send(message)
+
+        try:
+            return await sse_transport.handle_post_message(request.scope, request.receive, send_wrapper)
+        except Exception as e:
+            logger.error(f"Error handling Streamable HTTP POST: {e}", exc_info=True)
+            return JSONResponse({"error": "Internal server error"}, status_code=500)
+
+    else:
+        return JSONResponse({"error": "Method not allowed"}, status_code=405)
+
+
 async def root_endpoint(request: Request) -> JSONResponse:
     """
     Root endpoint with server information.
@@ -130,8 +188,9 @@ async def root_endpoint(request: Request) -> JSONResponse:
         "description": "Multi-site SharePoint MCP server for Claude.ai",
         "version": "0.1.6",
         "endpoints": {
-            "sse": "/sse",
-            "messages": "/messages/{session_id}",
+            "mcp": "/mcp (Streamable HTTP - Recommended)",
+            "sse": "/sse (Legacy SSE)",
+            "messages": "/messages/{session_id} (Legacy)",
             "health": "/health"
         },
         "features": [
@@ -141,7 +200,7 @@ async def root_endpoint(request: Request) -> JSONResponse:
             "Advanced document processing (Word, PDF, Excel)",
             "Customer site mapping"
         ],
-        "usage": "Configure in Claude.ai with SSE endpoint: https://your-domain.railway.app/sse",
+        "usage": "Configure in Claude.ai with: https://your-domain.railway.app/mcp",
         "github": "https://github.com/MagicTurtle-s/sharepoint-mcp-railway",
         "active_sessions": len(sessions)
     })
@@ -153,8 +212,9 @@ app = Starlette(
     routes=[
         Route('/', root_endpoint, methods=['GET']),
         Route('/health', health_check, methods=['GET']),
-        Route('/sse', handle_sse, methods=['GET']),
-        Route('/messages/{session_id:path}', handle_messages, methods=['POST']),
+        Route('/mcp', handle_mcp, methods=['GET', 'POST']),  # Streamable HTTP transport (modern)
+        Route('/sse', handle_sse, methods=['GET']),  # Legacy SSE transport
+        Route('/messages/{session_id:path}', handle_messages, methods=['POST']),  # Legacy SSE messages
     ],
     middleware=[
         Middleware(
@@ -176,8 +236,9 @@ async def startup_event():
     logger.info("SharePoint MCP Railway Server Starting")
     logger.info("=" * 60)
     logger.info(f"Multi-site mode enabled")
-    logger.info(f"SSE endpoint: /sse")
-    logger.info(f"Messages endpoint: /messages/{{session_id}}")
+    logger.info(f"Streamable HTTP endpoint: /mcp (RECOMMENDED)")
+    logger.info(f"Legacy SSE endpoint: /sse")
+    logger.info(f"Legacy messages endpoint: /messages/{{session_id}}")
     logger.info(f"Health check: /health")
     logger.info("=" * 60)
 
