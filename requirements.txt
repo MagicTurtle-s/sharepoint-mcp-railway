@@ -10,3 +10,4 @@ azure-identity>=1.15.0
 starlette>=0.37.0
 uvicorn[standard]>=0.30.0
 sse-starlette>=2.0.0
+-e .
