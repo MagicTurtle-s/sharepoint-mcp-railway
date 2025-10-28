@@ -7,8 +7,10 @@ enabling deployment to Railway and integration with Claude.ai web interface.
 
 import os
 import logging
+import uuid
+from typing import Dict
 from starlette.applications import Starlette
-from starlette.routing import Route, Mount
+from starlette.routing import Route
 from starlette.responses import JSONResponse, Response
 from starlette.requests import Request
 from mcp.server.sse import SseServerTransport
@@ -20,8 +22,8 @@ from . import tools, resources  # This registers all the tools
 
 logger.info("Initializing HTTP/SSE transport server...")
 
-# Create SSE transport
-sse_transport = SseServerTransport("/messages")
+# Session management - map session IDs to transports
+sessions: Dict[str, SseServerTransport] = {}
 
 
 async def health_check(request: Request) -> Response:
@@ -36,7 +38,8 @@ async def health_check(request: Request) -> Response:
         "server": "SharePoint MCP Railway",
         "version": "0.1.6",
         "transport": "SSE/HTTP",
-        "multi_site": True
+        "multi_site": True,
+        "active_sessions": len(sessions)
     })
 
 
@@ -47,20 +50,53 @@ async def handle_sse(request: Request) -> Response:
     This endpoint handles the MCP protocol over SSE, allowing Claude.ai
     web interface to communicate with the SharePoint MCP server.
     """
-    logger.info(f"SSE connection established from {request.client.host}")
+    session_id = str(uuid.uuid4())
+    logger.info(f"New SSE connection from {request.client.host}, session: {session_id}")
 
-    async with sse_transport.connect_sse(
-        request.scope,
-        request.receive,
-        request._send
-    ) as streams:
-        await mcp._mcp_server.run(
-            streams[0],  # read stream
-            streams[1],  # write stream
-            mcp._mcp_server.create_initialization_options()
-        )
+    # Create a new transport for this session
+    sse_transport = SseServerTransport(f"/messages/{session_id}")
+    sessions[session_id] = sse_transport
+
+    try:
+        async with sse_transport.connect_sse(
+            request.scope,
+            request.receive,
+            request._send
+        ) as streams:
+            await mcp._mcp_server.run(
+                streams[0],  # read stream
+                streams[1],  # write stream
+                mcp._mcp_server.create_initialization_options()
+            )
+    finally:
+        # Clean up session when connection closes
+        if session_id in sessions:
+            del sessions[session_id]
+            logger.info(f"Session {session_id} closed")
 
     return Response()
+
+
+async def handle_messages(request: Request) -> Response:
+    """
+    Handle POST messages from client.
+    
+    The session ID is in the URL path.
+    """
+    # Extract session ID from path
+    path_parts = request.url.path.split('/')
+    if len(path_parts) >= 3:
+        session_id = path_parts[2]
+    else:
+        return JSONResponse({"error": "Invalid session ID"}, status_code=400)
+
+    # Find the transport for this session
+    sse_transport = sessions.get(session_id)
+    if not sse_transport:
+        return JSONResponse({"error": "Session not found"}, status_code=404)
+
+    # Handle the message
+    return await sse_transport.handle_post_message(request.scope, request.receive, request._send)
 
 
 async def root_endpoint(request: Request) -> JSONResponse:
@@ -76,7 +112,7 @@ async def root_endpoint(request: Request) -> JSONResponse:
         "version": "0.1.6",
         "endpoints": {
             "sse": "/sse",
-            "messages": "/messages",
+            "messages": "/messages/{session_id}",
             "health": "/health"
         },
         "features": [
@@ -86,8 +122,9 @@ async def root_endpoint(request: Request) -> JSONResponse:
             "Advanced document processing (Word, PDF, Excel)",
             "Customer site mapping"
         ],
-        "usage": "Configure in Claude.ai with SSE endpoint URL",
-        "github": "https://github.com/MagicTurtle-s/sharepoint-mcp-railway"
+        "usage": "Configure in Claude.ai with SSE endpoint: https://your-domain.railway.app/sse",
+        "github": "https://github.com/MagicTurtle-s/sharepoint-mcp-railway",
+        "active_sessions": len(sessions)
     })
 
 
@@ -98,7 +135,7 @@ app = Starlette(
         Route('/', root_endpoint, methods=['GET']),
         Route('/health', health_check, methods=['GET']),
         Route('/sse', handle_sse, methods=['GET']),
-        Mount('/messages', app=sse_transport.handle_post_message),
+        Route('/messages/{session_id:path}', handle_messages, methods=['POST']),
     ]
 )
 
@@ -111,7 +148,7 @@ async def startup_event():
     logger.info("=" * 60)
     logger.info(f"Multi-site mode enabled")
     logger.info(f"SSE endpoint: /sse")
-    logger.info(f"Messages endpoint: /messages")
+    logger.info(f"Messages endpoint: /messages/{{session_id}}")
     logger.info(f"Health check: /health")
     logger.info("=" * 60)
 
