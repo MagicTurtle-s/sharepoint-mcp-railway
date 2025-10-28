@@ -129,7 +129,7 @@ async def handle_mcp(request: Request) -> Response:
     """
     if request.method == "GET":
         # GET request - establish a streaming connection
-        logger.info(f"New Streamable HTTP connection from {request.client.host}")
+        logger.info(f"New Streamable HTTP GET connection from {request.client.host}")
 
         # Create a new transport for this connection
         sse_transport = SseServerTransport("/mcp")
@@ -150,27 +150,64 @@ async def handle_mcp(request: Request) -> Response:
                     mcp._mcp_server.create_initialization_options()
                 )
         except Exception as e:
-            logger.error(f"Error in Streamable HTTP connection: {e}", exc_info=True)
+            logger.error(f"Error in Streamable HTTP GET connection: {e}", exc_info=True)
             raise
 
         return Response()
 
     elif request.method == "POST":
-        # POST request - handle a message
+        # POST request - handle a JSON-RPC message and return JSON response
         logger.info(f"Streamable HTTP POST message from {request.client.host}")
 
-        # Create a temporary transport to handle the message
-        sse_transport = SseServerTransport("/mcp")
-
-        async def send_wrapper(message):
-            """Wrapper to properly handle send calls"""
-            await request._send(message)
-
         try:
-            return await sse_transport.handle_post_message(request.scope, request.receive, send_wrapper)
+            # Read the JSON-RPC request body
+            body = await request.body()
+            request_data = json.loads(body)
+            logger.debug(f"Received JSON-RPC request: {request_data.get('method', 'unknown')}")
+
+            # Create response queue to capture the response
+            response_data = None
+            response_event = asyncio.Event()
+
+            # Create a custom send function that captures the response
+            async def capture_send(message):
+                nonlocal response_data
+                if message.get("type") == "http.response.body":
+                    body_data = message.get("body", b"")
+                    if body_data:
+                        try:
+                            response_data = json.loads(body_data)
+                        except:
+                            response_data = {"error": "Invalid response format"}
+                    response_event.set()
+
+            # Create temporary transport and handle the message
+            sse_transport = SseServerTransport("/mcp")
+
+            # Try to handle the POST message
+            result = await sse_transport.handle_post_message(request.scope, request.receive, capture_send)
+
+            # If handle_post_message returns a response, use it
+            if result is not None:
+                return result
+
+            # Otherwise, wait for captured response or timeout
+            try:
+                await asyncio.wait_for(response_event.wait(), timeout=30.0)
+                if response_data:
+                    return JSONResponse(response_data)
+            except asyncio.TimeoutError:
+                logger.error("Timeout waiting for MCP response")
+
+            # Fallback: return a basic response
+            return JSONResponse({"jsonrpc": "2.0", "error": {"code": -32603, "message": "Internal error"}, "id": request_data.get("id")})
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in POST request: {e}")
+            return JSONResponse({"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error"}, "id": None}, status_code=400)
         except Exception as e:
             logger.error(f"Error handling Streamable HTTP POST: {e}", exc_info=True)
-            return JSONResponse({"error": "Internal server error"}, status_code=500)
+            return JSONResponse({"jsonrpc": "2.0", "error": {"code": -32603, "message": "Internal error"}, "id": None}, status_code=500)
 
     else:
         return JSONResponse({"error": "Method not allowed"}, status_code=405)
