@@ -13,6 +13,8 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.responses import JSONResponse, Response
 from starlette.requests import Request
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
 from mcp.server.sse import SseServerTransport
 import uvicorn
 
@@ -57,17 +59,24 @@ async def handle_sse(request: Request) -> Response:
     sse_transport = SseServerTransport(f"/messages/{session_id}")
     sessions[session_id] = sse_transport
 
+    async def send_wrapper(message):
+        """Wrapper to properly handle send calls"""
+        await request._send(message)
+
     try:
         async with sse_transport.connect_sse(
             request.scope,
             request.receive,
-            request._send
+            send_wrapper
         ) as streams:
             await mcp._mcp_server.run(
                 streams[0],  # read stream
                 streams[1],  # write stream
                 mcp._mcp_server.create_initialization_options()
             )
+    except Exception as e:
+        logger.error(f"Error in SSE connection: {e}", exc_info=True)
+        raise
     finally:
         # Clean up session when connection closes
         if session_id in sessions:
@@ -80,7 +89,7 @@ async def handle_sse(request: Request) -> Response:
 async def handle_messages(request: Request) -> Response:
     """
     Handle POST messages from client.
-    
+
     The session ID is in the URL path.
     """
     # Extract session ID from path
@@ -88,15 +97,25 @@ async def handle_messages(request: Request) -> Response:
     if len(path_parts) >= 3:
         session_id = path_parts[2]
     else:
+        logger.warning("Invalid session ID in message request")
         return JSONResponse({"error": "Invalid session ID"}, status_code=400)
 
     # Find the transport for this session
     sse_transport = sessions.get(session_id)
     if not sse_transport:
+        logger.warning(f"Session {session_id} not found")
         return JSONResponse({"error": "Session not found"}, status_code=404)
 
-    # Handle the message
-    return await sse_transport.handle_post_message(request.scope, request.receive, request._send)
+    async def send_wrapper(message):
+        """Wrapper to properly handle send calls"""
+        await request._send(message)
+
+    try:
+        # Handle the message
+        return await sse_transport.handle_post_message(request.scope, request.receive, send_wrapper)
+    except Exception as e:
+        logger.error(f"Error handling message for session {session_id}: {e}", exc_info=True)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 async def root_endpoint(request: Request) -> JSONResponse:
@@ -128,7 +147,7 @@ async def root_endpoint(request: Request) -> JSONResponse:
     })
 
 
-# Create Starlette application
+# Create Starlette application with CORS middleware
 app = Starlette(
     debug=False,
     routes=[
@@ -136,6 +155,16 @@ app = Starlette(
         Route('/health', health_check, methods=['GET']),
         Route('/sse', handle_sse, methods=['GET']),
         Route('/messages/{session_id:path}', handle_messages, methods=['POST']),
+    ],
+    middleware=[
+        Middleware(
+            CORSMiddleware,
+            allow_origins=["*"],  # Allow all origins for claude.ai and other MCP clients
+            allow_credentials=True,
+            allow_methods=["*"],  # Allow all HTTP methods
+            allow_headers=["*"],  # Allow all headers
+            expose_headers=["*"],  # Expose all headers to the client
+        )
     ]
 )
 
