@@ -226,8 +226,13 @@ async def handle_mcp(request: Request) -> Response:
                     elif hasattr(server, 'list_tools'):
                         logger.info("Found list_tools method")
                         tools_result = server.list_tools()
+                        logger.info(f"list_tools() returned type: {type(tools_result)}, value: {tools_result}")
+                        logger.info(f"Has .tools attribute: {hasattr(tools_result, 'tools')}")
                         if hasattr(tools_result, 'tools'):
+                            logger.info(f"tools_result.tools = {tools_result.tools}")
                             tools_list = tools_result.tools
+                        else:
+                            logger.info(f"tools_result attributes: {dir(tools_result)}")
                     elif hasattr(server, '_tools'):
                         logger.info(f"Found _tools attribute")
                         for tool_name, tool_func in server._tools.items():
