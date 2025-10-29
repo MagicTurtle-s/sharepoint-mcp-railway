@@ -222,25 +222,19 @@ async def handle_mcp(request: Request) -> Response:
                         tools_result = tool_manager.list_tools()
                         logger.info(f"list_tools() result type: {type(tools_result)}, count: {len(tools_result) if hasattr(tools_result, '__len__') else 'unknown'}")
                         
-                        # Convert Tool objects to JSON-serializable dicts
+                        # Convert Tool objects to MCP protocol format
                         for tool in tools_result:
-                            logger.info(f"Tool: {tool.name if hasattr(tool, 'name') else 'unknown'}")
-                            logger.info(f"Tool attributes: {[a for a in dir(tool) if not a.startswith('_')]}")
+                            logger.info(f"Tool: {tool.name}")
                             
-                            # Try to get tool as dict first (might already be serializable)
-                            if hasattr(tool, 'model_dump'):
-                                tool_dict = tool.model_dump()
-                            elif hasattr(tool, 'dict'):
-                                tool_dict = tool.dict()
-                            else:
-                                # Manual conversion
-                                tool_dict = {
-                                    "name": tool.name,
-                                    "description": getattr(tool, 'description', ''),
-                                    "inputSchema": getattr(tool, 'inputSchema', {})
-                                }
+                            # MCP protocol requires: name, description, inputSchema
+                            # The 'parameters' field contains the input schema
+                            tool_dict = {
+                                "name": tool.name,
+                                "description": tool.description or "",
+                                "inputSchema": tool.parameters if hasattr(tool, 'parameters') else {}
+                            }
                             
-                            logger.info(f"Converted tool_dict keys: {tool_dict.keys()}")
+                            logger.info(f"Tool dict: name={tool_dict['name']}, has inputSchema={bool(tool_dict['inputSchema'])}")
                             tools_list.append(tool_dict)
                     elif hasattr(tool_manager, 'tools'):
                         logger.info(f"Found tool_manager.tools")
