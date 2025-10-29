@@ -209,45 +209,31 @@ async def handle_mcp(request: Request) -> Response:
                 # Get tools from the MCP server
                 tools_list = []
 
-                # Try different ways to access tools from FastMCP
-                logger.info(f"MCP type: {type(mcp)}, has _mcp_server: {hasattr(mcp, '_mcp_server')}")
-
-                # FastMCP stores tools in _mcp_server.request_handlers['tools/list']
-                # But we need to access the tool definitions differently
-                if hasattr(mcp, '_mcp_server'):
+                # Try to get tools directly from FastMCP
+                logger.info(f"MCP type: {type(mcp)}")
+                
+                # FastMCP stores tools in _tools dict
+                if hasattr(mcp, '_tools'):
+                    logger.info(f"Found mcp._tools with {len(mcp._tools)} tools")
+                    for tool_name, tool_info in mcp._tools.items():
+                        logger.info(f"Tool: {tool_name}")
+                        tools_list.append(tool_info)
+                elif hasattr(mcp, '_mcp_server'):
                     server = mcp._mcp_server
-                    logger.info(f"Server type: {type(server)}")
-
-                    # Check different possible locations
-                    if hasattr(server, '_tool_manager') and hasattr(server._tool_manager, 'tools'):
-                        logger.info(f"Found _tool_manager.tools with {len(server._tool_manager.tools)} tools")
-                        for tool in server._tool_manager.tools:
-                            tools_list.append(tool)
-                    elif hasattr(server, 'list_tools'):
-                        logger.info("Found list_tools method")
-                        tools_result = server.list_tools()
-                        logger.info(f"list_tools() returned type: {type(tools_result)}, value: {tools_result}")
-                        logger.info(f"Has .tools attribute: {hasattr(tools_result, 'tools')}")
-                        if hasattr(tools_result, 'tools'):
-                            logger.info(f"tools_result.tools = {tools_result.tools}")
-                            tools_list = tools_result.tools
-                        else:
-                            logger.info(f"tools_result attributes: {dir(tools_result)}")
-                    elif hasattr(server, '_tools'):
-                        logger.info(f"Found _tools attribute")
-                        for tool_name, tool_func in server._tools.items():
-                            tool_info = {
-                                "name": tool_name,
-                                "description": getattr(tool_func, '__doc__', ''),
-                                "inputSchema": {
-                                    "type": "object",
-                                    "properties": {},
-                                    "required": []
-                                }
-                            }
-                            tools_list.append(tool_info)
-                    else:
-                        logger.warning(f"Could not find tools. Server attributes: {[a for a in dir(server) if not a.startswith('_')]}")
+                    logger.info(f"Checking _mcp_server: {type(server)}")
+                    
+                    # Check request_handlers for tools/list
+                    if hasattr(server, 'request_handlers') and 'tools/list' in server.request_handlers:
+                        logger.info("Found tools/list handler, trying to call it")
+                        handler = server.request_handlers['tools/list']
+                        # This is an async handler that expects a request
+                        # We can't call it directly without proper request context
+                        logger.warning("Cannot call tools/list handler without request context")
+                    
+                    logger.warning(f"Could not find tools. Available attributes: {[a for a in dir(mcp) if not a.startswith('__')]}")
+                    logger.warning(f"Server attributes: {[a for a in dir(server) if not a.startswith('_')]}")
+                else:
+                    logger.error("No _mcp_server or _tools found on mcp object")
 
                 response = {
                     "jsonrpc": "2.0",
