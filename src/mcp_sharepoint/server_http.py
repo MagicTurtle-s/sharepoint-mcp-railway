@@ -292,40 +292,61 @@ async def handle_mcp(request: Request) -> Response:
 
                 logger.info(f"Calling tool: {tool_name} with args: {tool_args}")
 
-                # Call the tool through the MCP server
-                if hasattr(mcp, '_mcp_server') and hasattr(mcp._mcp_server, '_tools'):
-                    if tool_name in mcp._mcp_server._tools:
-                        try:
-                            tool_func = mcp._mcp_server._tools[tool_name]
-                            result = await tool_func(**tool_args)
+                # Call the tool through FastMCP's tool manager
+                if hasattr(mcp, '_tool_manager'):
+                    tool_manager = mcp._tool_manager
+                    logger.info(f"Found tool_manager, looking for tool: {tool_name}")
 
-                            response = {
-                                "jsonrpc": "2.0",
-                                "id": request_id,
-                                "result": {
-                                    "content": [
-                                        {
-                                            "type": "text",
-                                            "text": str(result)
-                                        }
-                                    ]
+                    # Get all tools from tool_manager
+                    if hasattr(tool_manager, 'list_tools'):
+                        tools_result = tool_manager.list_tools()
+
+                        # Find the requested tool
+                        tool_obj = None
+                        for tool in tools_result:
+                            if tool.name == tool_name:
+                                tool_obj = tool
+                                break
+
+                        if tool_obj:
+                            try:
+                                logger.info(f"Found tool object, executing: {tool_name}")
+
+                                # Execute the tool - FastMCP tools have a 'fn' attribute
+                                if hasattr(tool_obj, 'fn'):
+                                    result = await tool_obj.fn(**tool_args) if tool_obj.is_async else tool_obj.fn(**tool_args)
+                                else:
+                                    logger.error(f"Tool {tool_name} has no 'fn' attribute")
+                                    raise Exception("Tool has no callable function")
+
+                                response = {
+                                    "jsonrpc": "2.0",
+                                    "id": request_id,
+                                    "result": {
+                                        "content": [
+                                            {
+                                                "type": "text",
+                                                "text": str(result)
+                                            }
+                                        ]
+                                    }
                                 }
-                            }
-                            logger.info(f"Tool {tool_name} executed successfully")
-                            return JSONResponse(response)
-                        except Exception as e:
-                            logger.error(f"Error executing tool {tool_name}: {e}", exc_info=True)
-                            response = {
-                                "jsonrpc": "2.0",
-                                "id": request_id,
-                                "error": {
-                                    "code": -32603,
-                                    "message": f"Tool execution failed: {str(e)}"
+                                logger.info(f"Tool {tool_name} executed successfully")
+                                return JSONResponse(response)
+                            except Exception as e:
+                                logger.error(f"Error executing tool {tool_name}: {e}", exc_info=True)
+                                response = {
+                                    "jsonrpc": "2.0",
+                                    "id": request_id,
+                                    "error": {
+                                        "code": -32603,
+                                        "message": f"Tool execution failed: {str(e)}"
+                                    }
                                 }
-                            }
-                            return JSONResponse(response)
+                                return JSONResponse(response)
 
                 # Tool not found
+                logger.error(f"Tool not found: {tool_name}")
                 response = {
                     "jsonrpc": "2.0",
                     "id": request_id,
@@ -335,6 +356,8 @@ async def handle_mcp(request: Request) -> Response:
                     }
                 }
                 return JSONResponse(response)
+
+
 
             # Handle notifications (no response needed)
             elif request_id is None:
