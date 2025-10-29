@@ -225,7 +225,7 @@ async def handle_mcp(request: Request) -> Response:
                             tools_list.append(tool)
                     elif hasattr(server, 'list_tools'):
                         logger.info("Found list_tools method")
-                        tools_result = await server.list_tools()
+                        tools_result = server.list_tools()
                         if hasattr(tools_result, 'tools'):
                             tools_list = tools_result.tools
                     elif hasattr(server, '_tools'):
