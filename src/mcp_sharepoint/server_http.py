@@ -220,25 +220,27 @@ async def handle_mcp(request: Request) -> Response:
                     if hasattr(tool_manager, 'list_tools'):
                         logger.info("Calling tool_manager.list_tools()")
                         tools_result = tool_manager.list_tools()
-                        logger.info(f"list_tools() result type: {type(tools_result)}")
+                        logger.info(f"list_tools() result type: {type(tools_result)}, count: {len(tools_result) if hasattr(tools_result, '__len__') else 'unknown'}")
                         
-                        # Handle different return types
-                        if isinstance(tools_result, list):
-                            tools_list = tools_result
-                        elif hasattr(tools_result, 'tools'):
-                            tools_list = tools_result.tools
-                        else:
-                            logger.warning(f"Unexpected result type, trying as iterable")
-                            try:
-                                tools_list = list(tools_result)
-                            except:
-                                logger.error(f"Could not convert result to list. Attributes: {dir(tools_result)}")
+                        # Convert Tool objects to JSON-serializable dicts
+                        for tool in tools_result:
+                            logger.info(f"Tool: {tool.name if hasattr(tool, 'name') else 'unknown'}")
+                            # Tool objects need to be converted to dict format
+                            tool_dict = {
+                                "name": tool.name,
+                                "description": tool.description if hasattr(tool, 'description') else "",
+                                "inputSchema": tool.inputSchema if hasattr(tool, 'inputSchema') else {}
+                            }
+                            tools_list.append(tool_dict)
                     elif hasattr(tool_manager, 'tools'):
                         logger.info(f"Found tool_manager.tools")
-                        tools_list = list(tool_manager.tools)
-                    elif hasattr(tool_manager, '_tools'):
-                        logger.info(f"Found tool_manager._tools")
-                        tools_list = list(tool_manager._tools.values())
+                        for tool in tool_manager.tools:
+                            tool_dict = {
+                                "name": tool.name,
+                                "description": tool.description if hasattr(tool, 'description') else "",
+                                "inputSchema": tool.inputSchema if hasattr(tool, 'inputSchema') else {}
+                            }
+                            tools_list.append(tool_dict)
                     else:
                         logger.warning(f"tool_manager attributes: {[a for a in dir(tool_manager) if not a.startswith('__')]}")
                 else:
