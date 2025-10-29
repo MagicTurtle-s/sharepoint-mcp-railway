@@ -225,12 +225,22 @@ async def handle_mcp(request: Request) -> Response:
                         # Convert Tool objects to JSON-serializable dicts
                         for tool in tools_result:
                             logger.info(f"Tool: {tool.name if hasattr(tool, 'name') else 'unknown'}")
-                            # Tool objects need to be converted to dict format
-                            tool_dict = {
-                                "name": tool.name,
-                                "description": tool.description if hasattr(tool, 'description') else "",
-                                "inputSchema": tool.inputSchema if hasattr(tool, 'inputSchema') else {}
-                            }
+                            logger.info(f"Tool attributes: {[a for a in dir(tool) if not a.startswith('_')]}")
+                            
+                            # Try to get tool as dict first (might already be serializable)
+                            if hasattr(tool, 'model_dump'):
+                                tool_dict = tool.model_dump()
+                            elif hasattr(tool, 'dict'):
+                                tool_dict = tool.dict()
+                            else:
+                                # Manual conversion
+                                tool_dict = {
+                                    "name": tool.name,
+                                    "description": getattr(tool, 'description', ''),
+                                    "inputSchema": getattr(tool, 'inputSchema', {})
+                                }
+                            
+                            logger.info(f"Converted tool_dict keys: {tool_dict.keys()}")
                             tools_list.append(tool_dict)
                     elif hasattr(tool_manager, 'tools'):
                         logger.info(f"Found tool_manager.tools")
