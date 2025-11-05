@@ -1,15 +1,26 @@
 import base64, os
 from functools import wraps
 from typing import Optional, Dict, Any
-from .common import logger, mcp, SHP_DOC_LIBRARY, sp_context, get_sp_context_for_site
+from .common import logger, mcp, SHP_DOC_LIBRARY, sp_context, get_sp_context_for_site, get_sp_context_with_oauth
 from .resources import list_folders, list_documents, get_document_content, get_folder_tree, download_document
-from .graph_api import list_sharepoint_sites as _list_sharepoint_sites
+from .graph_api import list_sharepoint_sites as _list_sharepoint_sites, get_site_url_for_customer as _get_site_url_for_customer
 
 # Helper functions to reduce code duplication
 def _get_path(folder: str = "", file: Optional[str] = None) -> str:
     """Construct SharePoint path from components"""
     path = f"{SHP_DOC_LIBRARY}/{folder}".rstrip('/')
     return f"{path}/{file}" if file else path
+
+def _get_context(site_url: str, user_id: Optional[str] = None):
+    """
+    Get SharePoint context - uses OAuth if user_id provided, otherwise app credentials.
+
+    This provides backward compatibility while enabling OAuth authentication.
+    """
+    if user_id:
+        return get_sp_context_with_oauth(site_url, user_id)
+    else:
+        return get_sp_context_for_site(site_url)
 
 def _handle_sp_operation(func):
     """Decorator for SharePoint operations with error handling"""
@@ -34,7 +45,7 @@ def _file_success_response(file_obj, message: str) -> Dict[str, Any]:
 
 @mcp.tool(
     name="List_SharePoint_Sites",
-    description="Discover all accessible SharePoint sites in the tenant. Use this first to find site URLs for other operations."
+    description="Search and discover SharePoint sites by name or description. PERFORMANCE TIP: Always use 'search' parameter (e.g., search='Acme') to filter results and reduce token usage (~20 tokens vs ~400 tokens). Returns site_url needed for other operations."
 )
 async def list_sharepoint_sites_tool(search: Optional[str] = None):
     """
@@ -64,13 +75,77 @@ async def list_sharepoint_sites_tool(search: Optional[str] = None):
         }
 
 
+@mcp.tool(
+    name="Get_Customer_Site_URL",
+    description="Fast customer site URL lookup by name. Uses customer mappings for instant lookup (0 API calls, ~1ms), falls back to search if not mapped. More efficient than List_SharePoint_Sites for known customers. Configure CUSTOMER_SITES environment variable for best performance."
+)
+async def get_customer_site_url_tool(customer_name: str):
+    """
+    Resolve customer name to SharePoint site URL.
+    
+    This tool provides the fastest way to get a customer's site URL:
+    - If customer is in CUSTOMER_SITES mapping: Instant lookup (0 API calls, ~1ms)
+    - If not mapped: Falls back to search (1 API call, ~500ms)
+    
+    EFFICIENCY BENEFIT:
+    - Instant lookup (0 API calls) vs List_SharePoint_Sites (1 API call)
+    - ~10 tokens vs ~20 tokens (if mapped) or ~400 tokens (if listing all)
+    - No ambiguity: Exact customer name → exact site URL
+    
+    SETUP: Configure CUSTOMER_SITES environment variable for top 10-20 customers.
+    See CUSTOMER_MAPPING_SETUP.md for instructions.
+    
+    Args:
+        customer_name: Friendly customer name (e.g., "Acme Corp", "Wayne Enterprises")
+    
+    Returns:
+        {
+            "success": True,
+            "customer_name": "Acme Corp",
+            "site_url": "https://tenant.sharepoint.com/sites/acme-corp",
+            "method": "mapping"  # or "search" if fallback was used
+        }
+    
+    Example:
+        Input: {"customer_name": "Acme Corp"}
+        Output: {"success": True, "site_url": "https://...", "method": "mapping"}
+    """
+    try:
+        site_url = await _get_site_url_for_customer(customer_name)
+        if site_url:
+            # Check if mapping was used or search fallback
+            from .graph_api import load_customer_site_mappings
+            mappings = load_customer_site_mappings()
+            method = "mapping" if customer_name in mappings else "search"
+            
+            return {
+                "success": True,
+                "customer_name": customer_name,
+                "site_url": site_url,
+                "method": method
+            }
+        else:
+            return {
+                "success": False,
+                "customer_name": customer_name,
+                "message": f"Could not find SharePoint site for customer: {customer_name}. Try List_SharePoint_Sites with search parameter."
+            }
+    except Exception as e:
+        logger.error(f"Error getting site URL for customer '{customer_name}': {str(e)}")
+        return {
+            "success": False,
+            "customer_name": customer_name,
+            "message": f"Failed to resolve customer site: {str(e)}"
+        }
+
+
 # ===== DOCUMENT & FOLDER TOOLS (Multi-Site Ready) =====
 
 @mcp.tool(
     name="List_SharePoint_Folders",
-    description="List folders in a SharePoint site directory. Requires site_url from List_SharePoint_Sites."
+    description="List folders in a SharePoint site directory. Requires site_url from List_SharePoint_Sites. Optional user_id for OAuth authentication."
 )
-async def list_folders_tool(site_url: str, parent_folder: Optional[str] = None, doc_library: Optional[str] = None):
+async def list_folders_tool(site_url: str, parent_folder: Optional[str] = None, doc_library: Optional[str] = None, user_id: Optional[str] = None):
     """
     List folders in the specified SharePoint directory or root if not specified.
 
@@ -78,9 +153,10 @@ async def list_folders_tool(site_url: str, parent_folder: Optional[str] = None, 
         site_url: Full SharePoint site URL (e.g., https://tenant.sharepoint.com/sites/sitename)
         parent_folder: Relative folder path within doc library (optional, defaults to root)
         doc_library: Document library name (optional, defaults to "Shared Documents")
+        user_id: User identifier for OAuth authentication (optional, uses app credentials if not provided)
     """
     try:
-        ctx = get_sp_context_for_site(site_url)
+        ctx = _get_context(site_url, user_id)
         return list_folders(parent_folder, ctx)
     except Exception as e:
         logger.error(f"Error listing folders: {str(e)}")
@@ -90,7 +166,7 @@ async def list_folders_tool(site_url: str, parent_folder: Optional[str] = None, 
     name="List_SharePoint_Documents",
     description="List all documents in a SharePoint folder. Requires site_url from List_SharePoint_Sites."
 )
-async def list_documents_tool(site_url: str, folder_name: str, doc_library: Optional[str] = None):
+async def list_documents_tool(site_url: str, folder_name: str, doc_library: Optional[str] = None, user_id: Optional[str] = None):
     """
     List all documents in a specified SharePoint folder.
 
@@ -100,7 +176,7 @@ async def list_documents_tool(site_url: str, folder_name: str, doc_library: Opti
         doc_library: Document library name (optional, defaults to "Shared Documents")
     """
     try:
-        ctx = get_sp_context_for_site(site_url)
+        ctx = _get_context(site_url, user_id)
         return list_documents(folder_name, ctx)
     except Exception as e:
         logger.error(f"Error listing documents: {str(e)}")
@@ -110,7 +186,7 @@ async def list_documents_tool(site_url: str, folder_name: str, doc_library: Opti
     name="Get_SharePoint_Tree",
     description="Get a recursive tree view of a SharePoint folder structure. Requires site_url."
 )
-async def get_sharepoint_tree_tool(site_url: str, parent_folder: Optional[str] = None, doc_library: Optional[str] = None):
+async def get_sharepoint_tree_tool(site_url: str, parent_folder: Optional[str] = None, doc_library: Optional[str] = None, user_id: Optional[str] = None):
     """
     Get a recursive tree view of a SharePoint folder.
 
@@ -120,7 +196,7 @@ async def get_sharepoint_tree_tool(site_url: str, parent_folder: Optional[str] =
         doc_library: Document library name (optional, defaults to "Shared Documents")
     """
     try:
-        ctx = get_sp_context_for_site(site_url)
+        ctx = _get_context(site_url, user_id)
         return get_folder_tree(parent_folder, ctx)
     except Exception as e:
         logger.error(f"Error getting folder tree: {str(e)}")
@@ -130,7 +206,7 @@ async def get_sharepoint_tree_tool(site_url: str, parent_folder: Optional[str] =
     name="Get_Document_Content",
     description="Get content of a document in SharePoint with text extraction for Word/PDF/Excel. Requires site_url."
 )
-async def get_document_content_tool(site_url: str, folder_name: str, file_name: str, doc_library: Optional[str] = None):
+async def get_document_content_tool(site_url: str, folder_name: str, file_name: str, doc_library: Optional[str] = None, user_id: Optional[str] = None):
     """
     Get content of a document in SharePoint with intelligent text extraction.
 
@@ -141,7 +217,7 @@ async def get_document_content_tool(site_url: str, folder_name: str, file_name: 
         doc_library: Document library name (optional, defaults to "Shared Documents")
     """
     try:
-        ctx = get_sp_context_for_site(site_url)
+        ctx = _get_context(site_url, user_id)
         return get_document_content(folder_name, file_name, ctx)
     except Exception as e:
         logger.error(f"Error getting document content: {str(e)}")
@@ -152,7 +228,7 @@ async def get_document_content_tool(site_url: str, folder_name: str, file_name: 
     description="Create a new folder in a SharePoint site. Requires site_url."
 )
 @_handle_sp_operation
-async def create_folder(site_url: str, folder_name: str, parent_folder: Optional[str] = None, doc_library: Optional[str] = None):
+async def create_folder(site_url: str, folder_name: str, parent_folder: Optional[str] = None, doc_library: Optional[str] = None, user_id: Optional[str] = None):
     """
     Create a new folder in the specified directory or root if not specified.
 
@@ -161,8 +237,9 @@ async def create_folder(site_url: str, folder_name: str, parent_folder: Optional
         folder_name: Name of the new folder to create
         parent_folder: Parent folder path (optional, defaults to root)
         doc_library: Document library name (optional, defaults to "Shared Documents")
+        user_id: Optional user ID for OAuth authentication
     """
-    ctx = get_sp_context_for_site(site_url)
+    ctx = _get_context(site_url, user_id)
     parent_path = _get_path(parent_folder or "")
     logger.info(f"Creating folder '{folder_name}' in {parent_folder or 'root directory'} at {site_url}")
 
@@ -182,7 +259,7 @@ async def create_folder(site_url: str, folder_name: str, parent_folder: Optional
     description="Upload a new file to a SharePoint directory. Requires site_url."
 )
 @_handle_sp_operation
-async def upload_document(site_url: str, folder_name: str, file_name: str, content: str, is_base64: bool = False, doc_library: Optional[str] = None):
+async def upload_document(site_url: str, folder_name: str, file_name: str, content: str, is_base64: bool = False, doc_library: Optional[str] = None, user_id: Optional[str] = None):
     """
     Upload a new file to a SharePoint directory.
 
@@ -193,8 +270,9 @@ async def upload_document(site_url: str, folder_name: str, file_name: str, conte
         content: File content (text or base64 encoded)
         is_base64: Whether content is base64 encoded (default: False)
         doc_library: Document library name (optional)
+        user_id: Optional user ID for OAuth authentication
     """
-    ctx = get_sp_context_for_site(site_url)
+    ctx = _get_context(site_url, user_id)
     logger.info(f"Uploading document {file_name} to folder {folder_name} at {site_url}")
 
     # Convert content and upload
@@ -210,7 +288,7 @@ async def upload_document(site_url: str, folder_name: str, file_name: str, conte
     description="Upload a file directly from local filesystem to SharePoint. Requires site_url."
 )
 @_handle_sp_operation
-async def upload_document_from_path(site_url: str, folder_name: str, file_path: str, new_file_name: Optional[str] = None, doc_library: Optional[str] = None):
+async def upload_document_from_path(site_url: str, folder_name: str, file_path: str, new_file_name: Optional[str] = None, doc_library: Optional[str] = None, user_id: Optional[str] = None):
     """
     Upload a file directly from a path without needing to convert to base64 first.
 
@@ -220,8 +298,9 @@ async def upload_document_from_path(site_url: str, folder_name: str, file_path: 
         file_path: Local file path to upload
         new_file_name: Name for uploaded file (optional, uses original filename if not provided)
         doc_library: Document library name (optional)
+        user_id: Optional user ID for OAuth authentication
     """
-    ctx = get_sp_context_for_site(site_url)
+    ctx = _get_context(site_url, user_id)
     logger.info(f"Uploading document from path {file_path} to folder {folder_name} at {site_url}")
 
     try:
@@ -245,7 +324,7 @@ async def upload_document_from_path(site_url: str, folder_name: str, file_path: 
     description="Update an existing document in SharePoint. Requires site_url."
 )
 @_handle_sp_operation
-async def update_document(site_url: str, folder_name: str, file_name: str, content: str, is_base64: bool = False, doc_library: Optional[str] = None):
+async def update_document(site_url: str, folder_name: str, file_name: str, content: str, is_base64: bool = False, doc_library: Optional[str] = None, user_id: Optional[str] = None):
     """
     Update an existing document in a SharePoint directory.
 
@@ -256,8 +335,9 @@ async def update_document(site_url: str, folder_name: str, file_name: str, conte
         content: New file content (text or base64 encoded)
         is_base64: Whether content is base64 encoded (default: False)
         doc_library: Document library name (optional)
+        user_id: Optional user ID for OAuth authentication
     """
-    ctx = get_sp_context_for_site(site_url)
+    ctx = _get_context(site_url, user_id)
     logger.info(f"Updating document {file_name} in folder {folder_name} at {site_url}")
 
     # Check if file exists
@@ -282,7 +362,7 @@ async def update_document(site_url: str, folder_name: str, file_name: str, conte
     description="Delete a document from SharePoint. Requires site_url."
 )
 @_handle_sp_operation
-async def delete_document(site_url: str, folder_name: str, file_name: str, doc_library: Optional[str] = None):
+async def delete_document(site_url: str, folder_name: str, file_name: str, doc_library: Optional[str] = None, user_id: Optional[str] = None):
     """
     Delete a document from a SharePoint directory.
 
@@ -291,8 +371,9 @@ async def delete_document(site_url: str, folder_name: str, file_name: str, doc_l
         folder_name: Folder path containing the file
         file_name: Name of the file to delete
         doc_library: Document library name (optional)
+        user_id: Optional user ID for OAuth authentication
     """
-    ctx = get_sp_context_for_site(site_url)
+    ctx = _get_context(site_url, user_id)
     logger.info(f"Deleting document {file_name} from folder {folder_name} at {site_url}")
 
     # Check if file exists and delete
@@ -312,7 +393,7 @@ async def delete_document(site_url: str, folder_name: str, file_name: str, doc_l
     description="Delete an empty folder from SharePoint. Requires site_url."
 )
 @_handle_sp_operation
-async def delete_folder(site_url: str, folder_path: str, doc_library: Optional[str] = None):
+async def delete_folder(site_url: str, folder_path: str, doc_library: Optional[str] = None, user_id: Optional[str] = None):
     """
     Delete an empty folder from SharePoint.
 
@@ -320,8 +401,9 @@ async def delete_folder(site_url: str, folder_path: str, doc_library: Optional[s
         site_url: Full SharePoint site URL
         folder_path: Path of the folder to delete
         doc_library: Document library name (optional)
+        user_id: Optional user ID for OAuth authentication
     """
-    ctx = get_sp_context_for_site(site_url)
+    ctx = _get_context(site_url, user_id)
     logger.info(f"Deleting folder: {folder_path} at {site_url}")
 
     # Get folder and check if it exists and is empty
@@ -351,7 +433,7 @@ async def delete_folder(site_url: str, folder_path: str, doc_library: Optional[s
     description="Download a document from SharePoint to local filesystem. Requires site_url."
 )
 @_handle_sp_operation
-async def download_document_tool(site_url: str, folder_name: str, file_name: str, local_path: str, doc_library: Optional[str] = None):
+async def download_document_tool(site_url: str, folder_name: str, file_name: str, local_path: str, doc_library: Optional[str] = None, user_id: Optional[str] = None):
     """
     Download a document from SharePoint to local filesystem with fallback support.
 
@@ -361,6 +443,7 @@ async def download_document_tool(site_url: str, folder_name: str, file_name: str
         file_name: Name of the file to download
         local_path: Local filesystem path for downloaded file
         doc_library: Document library name (optional)
+        user_id: Optional user ID for OAuth authentication
     """
-    ctx = get_sp_context_for_site(site_url)
+    ctx = _get_context(site_url, user_id)
     return download_document(folder_name, file_name, local_path, ctx)

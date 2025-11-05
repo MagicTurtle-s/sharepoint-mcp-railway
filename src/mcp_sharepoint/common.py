@@ -93,6 +93,55 @@ def get_sp_context_for_site(site_url: str) -> ClientContext:
     return ClientContext(site_url).with_credentials(_global_credentials)
 
 
+def get_sp_context_with_oauth(site_url: str, user_id: str) -> ClientContext:
+    """
+    Create a SharePoint ClientContext with per-user OAuth token.
+
+    This function uses delegated permissions with MSAL OAuth tokens,
+    enabling per-user authentication and proper audit trails.
+
+    Args:
+        site_url: Full SharePoint site URL
+        user_id: User identifier (email or session ID)
+
+    Returns:
+        ClientContext authenticated with user's OAuth token
+
+    Raises:
+        ValueError: If site_url is invalid or user is not authenticated
+        RuntimeError: If OAuth manager not initialized
+
+    Example:
+        >>> context = get_sp_context_with_oauth(
+        ...     "https://contoso.sharepoint.com/sites/acme-corp",
+        ...     "user@contoso.com"
+        ... )
+    """
+    # Import here to avoid circular dependency
+    from .oauth import get_oauth_manager
+
+    if not site_url:
+        raise ValueError("site_url is required")
+
+    if not site_url.startswith("https://"):
+        raise ValueError(f"site_url must start with https:// - got: {site_url}")
+
+    if "sharepoint.com" not in site_url:
+        raise ValueError(f"site_url must contain sharepoint.com - got: {site_url}")
+
+    if not user_id:
+        raise ValueError("user_id is required for OAuth authentication")
+
+    try:
+        oauth_mgr = get_oauth_manager()
+        logger.debug(f"Creating OAuth SharePoint context for user: {user_id}, site: {site_url}")
+        return oauth_mgr.get_sharepoint_context(site_url, user_id)
+    except RuntimeError as e:
+        # OAuth manager not initialized - fall back to app credentials
+        logger.warning(f"OAuth manager not available, falling back to app credentials: {e}")
+        return get_sp_context_for_site(site_url)
+
+
 def get_default_doc_library() -> str:
     """
     Get the default document library path.

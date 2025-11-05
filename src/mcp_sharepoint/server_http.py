@@ -23,11 +23,15 @@ import asyncio
 # Import the MCP server and register all tools
 from .common import logger, mcp
 from . import tools, resources  # This registers all the tools
+from .oauth import init_oauth_manager, get_oauth_manager
 
 logger.info("Initializing HTTP/SSE transport server...")
 
 # Session management - map session IDs to transports
 sessions: Dict[str, SseServerTransport] = {}
+
+# User session management - map session IDs to user IDs
+user_sessions: Dict[str, str] = {}
 
 
 async def health_check(request: Request) -> Response:
@@ -388,18 +392,164 @@ async def handle_mcp(request: Request) -> Response:
         return JSONResponse({"error": "Method not allowed"}, status_code=405)
 
 
+async def oauth_authorize(request: Request) -> Response:
+    """
+    OAuth authorization endpoint - initiates OAuth flow.
+
+    Redirects user to Microsoft Azure AD for authentication.
+    """
+    try:
+        oauth_mgr = get_oauth_manager()
+
+        # Generate state for CSRF protection
+        state = str(uuid.uuid4())
+
+        # Get authorization URL
+        auth_url = oauth_mgr.get_authorization_url(state=state)
+
+        logger.info(f"Redirecting to OAuth authorization: {auth_url}")
+
+        # Redirect to Azure AD
+        from starlette.responses import RedirectResponse
+        return RedirectResponse(url=auth_url)
+
+    except Exception as e:
+        logger.error(f"OAuth authorization error: {e}", exc_info=True)
+        return JSONResponse(
+            {"error": f"OAuth authorization failed: {str(e)}"},
+            status_code=500
+        )
+
+
+async def oauth_callback(request: Request) -> Response:
+    """
+    OAuth callback endpoint - handles authorization code exchange.
+
+    Called by Azure AD after user grants consent.
+    """
+    try:
+        oauth_mgr = get_oauth_manager()
+
+        # Get authorization code from query parameters
+        code = request.query_params.get('code')
+        state = request.query_params.get('state')
+        error = request.query_params.get('error')
+
+        if error:
+            logger.error(f"OAuth error: {error}")
+            return JSONResponse(
+                {"error": f"OAuth authorization failed: {error}"},
+                status_code=400
+            )
+
+        if not code:
+            return JSONResponse(
+                {"error": "Missing authorization code"},
+                status_code=400
+            )
+
+        # Exchange code for tokens
+        token_response = oauth_mgr.acquire_token_by_authorization_code(code)
+
+        # Extract user ID from token (use email or object ID)
+        # For now, use a session-based approach
+        session_id = str(uuid.uuid4())
+        user_id = token_response.get('id_token_claims', {}).get('email', session_id)
+
+        # Store tokens
+        oauth_mgr.store_user_token(user_id, token_response)
+        user_sessions[session_id] = user_id
+
+        logger.info(f"OAuth successful for user: {user_id}, session: {session_id}")
+
+        # Return success page with session info
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>OAuth Success</title>
+            <style>
+                body {{
+                    font-family: Arial, sans-serif;
+                    max-width: 600px;
+                    margin: 50px auto;
+                    padding: 20px;
+                    text-align: center;
+                }}
+                .success {{
+                    color: #28a745;
+                    font-size: 24px;
+                    margin-bottom: 20px;
+                }}
+                .session-id {{
+                    background: #f5f5f5;
+                    padding: 15px;
+                    border-radius: 5px;
+                    margin: 20px 0;
+                    font-family: monospace;
+                }}
+                .instructions {{
+                    text-align: left;
+                    background: #e9ecef;
+                    padding: 15px;
+                    border-radius: 5px;
+                    margin-top: 20px;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="success">✓ Authentication Successful!</div>
+            <p>You have successfully authenticated with Microsoft SharePoint.</p>
+
+            <div class="session-id">
+                <strong>Session ID:</strong><br>
+                {session_id}
+            </div>
+
+            <div class="instructions">
+                <h3>Next Steps:</h3>
+                <ol>
+                    <li>Copy your Session ID above</li>
+                    <li>Use this Session ID when calling SharePoint MCP tools</li>
+                    <li>The session will remain active for 1 hour</li>
+                </ol>
+                <p><strong>Note:</strong> Keep this Session ID secure - it provides access to your SharePoint data.</p>
+            </div>
+
+            <p style="margin-top: 30px;">
+                <a href="/">Return to home</a>
+            </p>
+        </body>
+        </html>
+        """
+
+        from starlette.responses import HTMLResponse
+        return HTMLResponse(content=html)
+
+    except Exception as e:
+        logger.error(f"OAuth callback error: {e}", exc_info=True)
+        return JSONResponse(
+            {"error": f"OAuth callback failed: {str(e)}"},
+            status_code=500
+        )
+
+
 async def oauth_not_required(request: Request) -> JSONResponse:
     """
-    OAuth discovery endpoints - indicate that OAuth is not required.
+    OAuth discovery endpoints - indicate that OAuth IS required.
 
     These endpoints are queried by claude.ai to discover if OAuth is needed.
-    Returning 404 tells claude.ai that this is a public endpoint with no auth.
+    We now return OAuth configuration instead of 404.
     """
     return JSONResponse(
-        {"error": "OAuth not required - this is a public MCP endpoint"},
-        status_code=404,
+        {
+            "authorization_endpoint": "/oauth/authorize",
+            "token_endpoint": "/oauth/callback",
+            "grant_types_supported": ["authorization_code"],
+            "scopes_supported": ["Files.ReadWrite.All", "Sites.ReadWrite.All"]
+        },
         headers={
-            "X-MCP-Auth": "none",
+            "X-MCP-Auth": "oauth",
             "Access-Control-Allow-Origin": "*",
         }
     )
@@ -445,7 +595,10 @@ app = Starlette(
         Route('/mcp', handle_mcp, methods=['GET', 'POST', 'HEAD']),  # Streamable HTTP transport (modern)
         Route('/sse', handle_sse, methods=['GET']),  # Legacy SSE transport
         Route('/messages/{session_id:path}', handle_messages, methods=['POST']),  # Legacy SSE messages
-        # OAuth discovery endpoints - return 404 to indicate no auth required
+        # OAuth endpoints
+        Route('/oauth/authorize', oauth_authorize, methods=['GET']),
+        Route('/oauth/callback', oauth_callback, methods=['GET']),
+        # OAuth discovery endpoints - return OAuth configuration
         Route('/.well-known/oauth-protected-resource/mcp', oauth_not_required, methods=['GET']),
         Route('/.well-known/oauth-authorization-server/mcp', oauth_not_required, methods=['GET']),
         Route('/.well-known/oauth-authorization-server', oauth_not_required, methods=['GET']),
@@ -466,13 +619,40 @@ app = Starlette(
 
 @app.on_event("startup")
 async def startup_event():
-    """Log server startup."""
+    """Initialize OAuth manager and log server startup."""
+    # Initialize OAuth manager
+    client_id = os.getenv('AZURE_CLIENT_ID') or os.getenv('SHP_ID_APP')
+    client_secret = os.getenv('AZURE_CLIENT_SECRET') or os.getenv('SHP_ID_APP_SECRET')
+    tenant_id = os.getenv('AZURE_TENANT_ID') or os.getenv('SHP_TENANT_ID')
+
+    # Get Railway URL or use localhost for development
+    railway_url = os.getenv('RAILWAY_PUBLIC_DOMAIN')
+    if railway_url:
+        redirect_uri = f"https://{railway_url}/oauth/callback"
+    else:
+        redirect_uri = "http://localhost:8000/oauth/callback"
+
+    try:
+        init_oauth_manager(
+            client_id=client_id,
+            client_secret=client_secret,
+            tenant_id=tenant_id,
+            redirect_uri=redirect_uri
+        )
+        logger.info(f"OAuth manager initialized with redirect URI: {redirect_uri}")
+    except Exception as e:
+        logger.error(f"Failed to initialize OAuth manager: {e}")
+        logger.warning("OAuth authentication will not be available")
+
     logger.info("=" * 60)
     logger.info("SharePoint MCP Railway Server Starting")
     logger.info("=" * 60)
     logger.info(f"Multi-site mode enabled")
+    logger.info(f"OAuth authentication: ENABLED")
     logger.info(f"Streamable HTTP endpoint: /mcp (RECOMMENDED)")
     logger.info(f"Legacy SSE endpoint: /sse")
+    logger.info(f"OAuth authorize: /oauth/authorize")
+    logger.info(f"OAuth callback: /oauth/callback")
     logger.info(f"Legacy messages endpoint: /messages/{{session_id}}")
     logger.info(f"Health check: /health")
     logger.info("=" * 60)

@@ -47,10 +47,36 @@ The server is built with resource efficiency and maintainability in mind:
 
 - **Efficient SharePoint API usage** with selective property loading to minimize bandwidth
 - **Smart error handling** through decorators for cleaner, more reliable code
-- **Clear separation of concerns** between resource management and tool implementation  
+- **Clear separation of concerns** between resource management and tool implementation
 - **Optimized content handling** for both text and binary files with automatic type detection
 - **Configurable tree operations** with depth limits and batch processing for large directories
 - **Async/await support** throughout for non-blocking operations
+- **Dual authentication modes**: Application Permissions (legacy) and Delegated Permissions (OAuth 2.0)
+
+## 🔐 Authentication Modes
+
+The SharePoint MCP supports two authentication modes:
+
+### Application Permissions (Legacy Mode)
+
+Uses a service account with tenant-wide access. Simple setup but lacks per-user audit trails.
+
+**Use case**: Single-user scenarios, development, testing
+
+### Delegated Permissions (OAuth 2.0) - Recommended
+
+Per-user OAuth authentication with proper audit trails in SharePoint.
+
+**Use case**: Multi-user deployments, production environments, compliance requirements
+
+**Features**:
+- ✅ Per-user authentication and authorization
+- ✅ Proper audit trails in SharePoint (operations logged as specific users)
+- ✅ Automatic token refresh (12-hour access tokens, 6-month refresh tokens)
+- ✅ Session-based token management
+- ✅ HTTP/SSE transport support for cloud deployment
+
+**Setup**: See [AZURE_AD_SETUP.md](AZURE_AD_SETUP.md) for detailed OAuth configuration instructions.
 
 ## Setup
 
