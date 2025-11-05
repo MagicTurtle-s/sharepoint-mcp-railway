@@ -1,8 +1,313 @@
-# Azure AD App Configuration for SharePoint MCP with OAuth
+# Azure AD OAuth Configuration for SharePoint MCP
 
-This guide explains how to configure your Azure AD app registration to support per-user OAuth authentication with delegated permissions.
+This guide walks you through configuring Azure AD for per-user OAuth authentication with the SharePoint MCP server.
 
 ## Overview
+
+The SharePoint MCP supports two authentication modes:
+
+1. **Application Permissions (Legacy)**: Service account with tenant-wide access
+2. **Delegated Permissions (OAuth 2.0)**: Per-user authentication (Recommended)
+
+This guide covers setting up **Delegated Permissions** for production multi-user deployments.
+
+## Benefits of OAuth/Delegated Permissions
+
+- ✅ **Per-user authentication**: Each user authenticates with their own credentials
+- ✅ **Proper audit trails**: SharePoint logs operations under the actual user's identity
+- ✅ **Granular permissions**: Users only access what they're authorized to see
+- ✅ **Automatic token refresh**: Long-lived refresh tokens (6 months) with short-lived access tokens (12 hours)
+- ✅ **Secure**: No shared credentials, tokens stored securely per session
+
+## Prerequisites
+
+- Azure AD admin access to register applications
+- SharePoint Online tenant
+- Railway account (for cloud deployment) or local server
+- Python 3.10 or higher
+
+## Step 1: Create Azure AD App Registration
+
+1. Go to [Azure Portal](https://portal.azure.com)
+2. Navigate to **Azure Active Directory** → **App registrations**
+3. Click **New registration**
+4. Configure the registration:
+   - **Name**: `SharePoint MCP Server` (or your preferred name)
+   - **Supported account types**: Select one of:
+     - `Accounts in this organizational directory only (Single tenant)` - Most common
+     - `Accounts in any organizational directory (Multi-tenant)` - If supporting multiple tenants
+   - **Redirect URI**:
+     - Platform: `Web`
+     - URI: `http://localhost:8000/oauth/callback` (for local testing)
+     - *Note: You'll add your Railway URL later after deployment*
+5. Click **Register**
+
+## Step 2: Configure API Permissions (Delegated)
+
+1. In your app registration, go to **API permissions**
+2. Click **Add a permission**
+3. Select **Microsoft Graph**
+4. Choose **Delegated permissions**
+5. Add these permissions:
+   - `Files.ReadWrite.All` - Read and write files in all site collections
+   - `Sites.ReadWrite.All` - Read and write items in all site collections
+   - `offline_access` - Maintain access to data you have given it access to
+6. Click **Add permissions**
+7. Click **Grant admin consent for [Your Tenant]** (requires admin rights)
+8. Confirm the consent
+
+### Why Delegated vs Application Permissions?
+
+| Feature | Delegated Permissions | Application Permissions |
+|---------|----------------------|------------------------|
+| Authentication | User credentials (OAuth) | App credentials (Client Secret) |
+| Audit trails | Logged as specific user | Logged as service account |
+| Access scope | User's permissions only | Tenant-wide access |
+| Use case | Multi-user production | Development, single-user |
+
+## Step 3: Create Client Secret
+
+1. In your app registration, go to **Certificates & secrets**
+2. Click **New client secret**
+3. Configure the secret:
+   - **Description**: `SharePoint MCP Production` (or your preferred name)
+   - **Expires**: Choose expiration period (recommend: 24 months for production)
+4. Click **Add**
+5. **IMPORTANT**: Copy the **Value** immediately - you won't be able to see it again!
+6. Store it securely (you'll use it as `SHP_ID_APP_SECRET`)
+
+## Step 4: Collect Required Information
+
+You'll need these values for your environment variables:
+
+| Variable | Where to Find | Example |
+|----------|---------------|---------|
+| `SHP_ID_APP` | App registration → Overview → Application (client) ID | `12345678-1234-1234-1234-123456789abc` |
+| `SHP_ID_APP_SECRET` | The secret value you just copied | `abc123~defGHI456...` |
+| `SHP_TENANT_ID` | App registration → Overview → Directory (tenant) ID | `87654321-4321-4321-4321-cba987654321` |
+| `SHP_SITE_URL` | Your SharePoint site URL | `https://contoso.sharepoint.com/sites/engineering` |
+| `SHP_DOC_LIBRARY` | Document library path | `Shared Documents` |
+
+## Step 5: Deploy to Railway
+
+### 5.1 Push Code to GitHub
+
+```bash
+cd /c/Users/jonat/sharepoint-mcp-railway
+git add .
+git commit -m "Add OAuth support for SharePoint MCP"
+git push origin main
+```
+
+### 5.2 Deploy to Railway
+
+```bash
+railway up
+```
+
+### 5.3 Set Environment Variables
+
+Via Railway web dashboard (https://railway.app):
+
+1. Select your project → `sharepoint-mcp-railway`
+2. Go to **Variables** tab
+3. Add these variables:
+
+```
+SHP_ID_APP=your-application-client-id
+SHP_ID_APP_SECRET=your-client-secret-value
+SHP_TENANT_ID=your-tenant-id
+SHP_SITE_URL=https://your-tenant.sharepoint.com/sites/your-site
+SHP_DOC_LIBRARY=Shared Documents
+```
+
+### 5.4 Get Railway Public URL
+
+1. In Railway dashboard, go to **Settings** tab
+2. Under **Domains**, click **Generate Domain**
+3. Copy the generated URL (e.g., `sharepoint-mcp-railway-production-xxxx.up.railway.app`)
+
+## Step 6: Update Azure AD Redirect URI
+
+1. Return to [Azure Portal](https://portal.azure.com) → **Azure Active Directory** → **App registrations**
+2. Select your SharePoint MCP app
+3. Go to **Authentication**
+4. Under **Web** platform → **Redirect URIs**, click **Add URI**
+5. Add your Railway URL with OAuth callback path:
+   ```
+   https://sharepoint-mcp-railway-production-xxxx.up.railway.app/oauth/callback
+   ```
+   *(Replace `xxxx` with your actual Railway subdomain)*
+6. Click **Save**
+
+## Step 7: Configure Claude Code CLI
+
+Add the SharePoint MCP server to your Claude Code configuration:
+
+```bash
+claude mcp add sharepoint-oauth https://sharepoint-mcp-railway-production-xxxx.up.railway.app/mcp
+```
+
+Verify it was added:
+
+```bash
+claude mcp list
+```
+
+## Step 8: Test OAuth Flow
+
+### 8.1 Test the Authorization Endpoint
+
+Open your browser and navigate to:
+
+```
+https://sharepoint-mcp-railway-production-xxxx.up.railway.app/oauth/authorize
+```
+
+You should be redirected to Microsoft login page.
+
+### 8.2 Complete OAuth Flow
+
+1. Sign in with your Microsoft account
+2. Consent to the requested permissions
+3. You should be redirected to the callback page showing "OAuth authorization successful!"
+4. The server stores your access and refresh tokens
+
+### 8.3 Test with Claude Code
+
+```bash
+claude "List the folders in SharePoint"
+```
+
+Claude Code should use the OAuth-authenticated session to access SharePoint on your behalf.
+
+## OAuth Token Flow
+
+### Initial Authentication
+
+```
+User → Claude Code → MCP Server (no token) → /oauth/authorize
+User → Azure AD (login) → Authorization Code
+Authorization Code → MCP Server → Exchange for tokens
+Azure AD → Access Token + Refresh Token → MCP Server
+MCP Server → Store tokens → SharePoint API call → Response
+```
+
+### Subsequent Requests
+
+```
+User → Claude Code → MCP Server (has token)
+  ├─ Token valid → SharePoint API call → Response
+  └─ Token expired → Refresh with refresh_token → New access token → SharePoint API call → Response
+```
+
+## Token Lifecycle
+
+| Token Type | Lifetime | Purpose | Storage |
+|------------|----------|---------|---------|
+| **Authorization Code** | 10 minutes | Exchange for tokens | Not stored (single-use) |
+| **Access Token** | 12 hours | Authenticate SharePoint API calls | In-memory cache (per user) |
+| **Refresh Token** | 6 months | Obtain new access tokens | In-memory cache (per user) |
+
+### Automatic Token Refresh
+
+The OAuth manager automatically refreshes expired access tokens using the refresh token. This happens transparently when making SharePoint API calls.
+
+## Troubleshooting
+
+### Error: "AADSTS50011: The redirect URI specified in the request does not match"
+
+**Solution**: Ensure the redirect URI in Azure AD exactly matches your Railway URL:
+- Azure AD: `https://sharepoint-mcp-railway-production-xxxx.up.railway.app/oauth/callback`
+- No trailing slashes
+- HTTPS (not HTTP)
+- Exact subdomain match
+
+### Error: "Insufficient privileges to complete the operation"
+
+**Causes**:
+1. Admin consent not granted for API permissions
+2. User doesn't have SharePoint permissions
+
+**Solutions**:
+1. In Azure AD → API permissions → Grant admin consent
+2. Verify user has SharePoint site access
+
+### Error: "Token expired" or "Invalid token"
+
+**Cause**: Access token expired and refresh failed
+
+**Solutions**:
+1. Re-authenticate: Visit `/oauth/authorize` again
+2. Check refresh token hasn't expired (6 months)
+3. Verify client secret is still valid
+
+### Error: "OAuth manager not initialized"
+
+**Cause**: Missing environment variables
+
+**Solution**: Verify all required variables are set in Railway:
+- `SHP_ID_APP`
+- `SHP_ID_APP_SECRET`
+- `SHP_TENANT_ID`
+
+## Security Best Practices
+
+1. **Rotate client secrets regularly**: Set expiration dates and rotate before expiry
+2. **Use HTTPS only**: Never use HTTP for OAuth callbacks in production
+3. **Validate redirect URIs**: Only register exact URLs you control
+4. **Least privilege**: Only request permissions you need
+5. **Monitor access**: Review Azure AD sign-in logs regularly
+6. **Token storage**: In production, consider persistent storage (e.g., Redis) instead of in-memory cache
+
+## Migration from Application Permissions
+
+If you're currently using Application Permissions (service account), here's how to migrate:
+
+### Before Migration
+
+```json
+{
+  "mcpServers": {
+    "sharepoint": {
+      "command": "mcp-sharepoint",
+      "env": {
+        "SHP_ID_APP": "app-id",
+        "SHP_ID_APP_SECRET": "app-secret",
+        "SHP_SITE_URL": "https://tenant.sharepoint.com/sites/site",
+        "SHP_TENANT_ID": "tenant-id"
+      }
+    }
+  }
+}
+```
+
+### After Migration
+
+```bash
+# Add to Claude Code
+claude mcp add sharepoint-oauth https://sharepoint-mcp-railway-production-xxxx.up.railway.app/mcp
+```
+
+### Benefits After Migration
+
+- ✅ Each user sees only their authorized content
+- ✅ SharePoint audit logs show actual users, not service account
+- ✅ No shared credentials to manage
+- ✅ Better compliance and governance
+
+## Support
+
+For issues or questions:
+- GitHub Issues: https://github.com/MagicTurtle-s/sharepoint-mcp-railway/issues
+- Original Project: https://github.com/Sofias-ai/mcp-sharepoint
+
+## References
+
+- [Microsoft Identity Platform](https://docs.microsoft.com/en-us/azure/active-directory/develop/)
+- [Microsoft Graph Permissions](https://docs.microsoft.com/en-us/graph/permissions-reference)
+- [OAuth 2.0 Authorization Code Flow](https://docs.microsoft.com/en-us/azure/active-directory/develop/v2-oauth2-auth-code-flow)
+- [Model Context Protocol](https://modelcontextprotocol.io)
 
 The SharePoint MCP now supports two authentication modes:
 1. **Application Permissions** (legacy) - Service account with tenant-wide access
