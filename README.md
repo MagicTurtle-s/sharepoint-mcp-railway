@@ -170,6 +170,31 @@ On macOS: `~/Library/Application\ Support/Claude/claude_desktop_config.json`
 }
 ```
 
+### Claude Code CLI Integration
+
+For Claude Code CLI with remote HTTP transport (Railway deployment):
+
+```bash
+claude mcp add sharepoint https://YOUR_DEPLOYMENT_URL/mcp
+```
+
+Replace `YOUR_DEPLOYMENT_URL` with your Railway deployment domain.
+
+Or manually add to `~/.claude.json`:
+
+```json
+{
+  "mcpServers": {
+    "sharepoint": {
+      "url": "https://YOUR_DEPLOYMENT_URL/mcp",
+      "transport": "http"
+    }
+  }
+}
+```
+
+**Note**: The Railway deployment uses HTTP/SSE transport and supports both OAuth (Delegated Permissions) and Application Permissions authentication modes. See [AZURE_AD_SETUP.md](AZURE_AD_SETUP.md) for OAuth configuration.
+
 ## Development
 
 ### Requirements
