@@ -53,9 +53,9 @@ class SharePointOAuthManager:
         self.authority = f"https://login.microsoftonline.com/{tenant_id}"
 
         # Required scopes for SharePoint with delegated permissions
+        # Using .default scope to request all delegated permissions configured in Azure AD
         self.scopes = [
-            "https://graph.microsoft.com/Files.ReadWrite.All",
-            "https://graph.microsoft.com/Sites.ReadWrite.All",
+            "https://graph.microsoft.com/.default",
             "offline_access"  # Required for refresh tokens
         ]
 
