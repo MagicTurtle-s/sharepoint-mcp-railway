@@ -54,9 +54,9 @@ class SharePointOAuthManager:
 
         # Required scopes for SharePoint with delegated permissions
         # Using .default scope to request all delegated permissions configured in Azure AD
+        # offline_access is automatically included with .default for confidential clients
         self.scopes = [
-            "https://graph.microsoft.com/.default",
-            "offline_access"  # Required for refresh tokens
+            "https://graph.microsoft.com/.default"
         ]
 
         # Create MSAL confidential client application
