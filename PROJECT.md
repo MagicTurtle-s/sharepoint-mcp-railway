@@ -93,6 +93,17 @@ async def get_document_content(
     # ... rest of implementation
 ```
 
+## Required MCPs
+
+When working on this project in Claude Code, you'll need the SharePoint MCP server enabled to test and develop the tools.
+
+**Setup:**
+1. Copy `.claude/settings.json.example` to `.claude/settings.json`
+2. Update the URL if using a different deployment
+3. Claude Code will automatically load the SharePoint MCP when working in this project directory
+
+This configuration is project-specific and won't affect other projects. The SharePoint MCP (~9.4k tokens) is only loaded when needed.
+
 ## Setup Instructions
 
 ### Prerequisites

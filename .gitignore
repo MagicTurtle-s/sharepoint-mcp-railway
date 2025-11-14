@@ -9,3 +9,6 @@ dist
 .env
 .venv
 mcp_sharepoint.log
+
+# User-specific Claude settings
+.claude/settings.json

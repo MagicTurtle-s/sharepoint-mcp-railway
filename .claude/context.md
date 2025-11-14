@@ -2,6 +2,20 @@
 
 This document provides Claude-specific context for working on the SharePoint MCP Railway project.
 
+## MCP Configuration
+
+This project uses a project-specific MCP configuration to load the SharePoint MCP server when working in this directory.
+
+**Setup:**
+- `.claude/settings.json` (local, gitignored) contains the actual MCP server configuration
+- `.claude/settings.json.example` (committed) serves as a template
+- The SharePoint MCP (~9.4k tokens) is only loaded when working in this project
+
+**When working on this project:**
+- The SharePoint MCP tools are automatically available for testing
+- You can use tools like `mcp__sharepoint__Get_Document_Content` directly
+- This configuration doesn't affect other projects
+
 ## Project Overview
 
 Multi-site SharePoint MCP server that enables access to 50+ customer SharePoint sites through a single Railway-deployed service. Forked from Sofias-ai/mcp-sharepoint with multi-site capabilities added.

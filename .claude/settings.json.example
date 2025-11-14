@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "sharepoint": {
+      "type": "http",
+      "url": "https://sharepoint-mcp-railway-production.up.railway.app/mcp",
+      "comment": "Replace with your deployed SharePoint MCP server URL"
+    }
+  }
+}
